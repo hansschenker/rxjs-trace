@@ -43,6 +43,75 @@ npm install rxjs-trace
 
 ## Usage
 
+### Worked example
+
+A typeahead pipeline traced at three points, with a one-line console sink.
+The output below is real.
+
+```ts
+import { Subject, debounceTime, delay, distinctUntilChanged, of, switchMap } from 'rxjs';
+import { trace, type TraceEvent } from 'rxjs-trace';
+
+// A sink: one compact line per event. Any function or object with `next` works.
+const log = (e: TraceEvent): void =>
+  console.log(
+    `${String(e.elapsedMs).padStart(4)}ms  ${e.span.padEnd(12)}${e.kind}` +
+      (e.value !== undefined ? `  ${JSON.stringify(e.value)}` : '') +
+      (e.error !== undefined ? `  ${e.error}` : ''),
+  );
+
+// Stand-in search backend that answers after 50 ms.
+const search = (q: string) => of([`${q}-1`, `${q}-2`]).pipe(delay(50));
+
+const input$ = new Subject<string>();
+const runId = 'typeahead-1'; // same id on every span, so the events correlate
+
+const results$ = input$.pipe(
+  trace('input', log, { trace: runId, summarize: (q) => q }),
+  debounceTime(100),
+  distinctUntilChanged(),
+  trace('debounced', log, { trace: runId, summarize: (q) => q }),
+  switchMap((q) => search(q).pipe(trace(`search:${q}`, log, { trace: runId }))),
+  trace('results', log, { trace: runId, summarize: (rows) => rows.length }),
+);
+
+const subscription = results$.subscribe();
+input$.next('r');
+input$.next('rx');
+setTimeout(() => input$.next('rxjs'), 30);
+setTimeout(() => subscription.unsubscribe(), 400);
+```
+
+```
+   0ms  results     subscribe
+   0ms  debounced   subscribe
+   0ms  input       subscribe
+   1ms  input       next  "r"
+   1ms  input       next  "rx"
+  46ms  input       next  "rxjs"
+ 154ms  debounced   next  "rxjs"
+   0ms  search:rxjs subscribe
+  61ms  search:rxjs next
+ 219ms  results     next  2
+  62ms  search:rxjs complete
+  62ms  search:rxjs unsubscribe
+ 402ms  input       unsubscribe
+ 402ms  debounced   unsubscribe
+ 405ms  results     unsubscribe
+```
+
+What the trace tells you:
+
+- **Subscription order is outer to inner**, then everything else flows inner
+  to outer. That is why `results` subscribes first but `input` emits first.
+- **The debounce did its job.** Three keystrokes went in, one query came out,
+  about 100 ms after the last one.
+- **The inner span has its own clock.** `search:rxjs` reads 0 ms at subscribe
+  and 61 ms at its result, because `elapsedMs` is per subscription. The outer
+  `results` span shows the same emission at 219 ms from the start of the run.
+- **No leaks.** Every span that subscribed also unsubscribed, including the
+  inner search, which tore down right after completing.
+
 ### Sinks
 
 The sink is a function or anything with a `next` method, so a `Subject`, an
